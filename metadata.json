@@ -1,0 +1,10 @@
+{
+  "name": "自然图鉴 (Nature Identifier)",
+  "description": "A beautiful and interactive frontend for an AI-powered insect identification application.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
