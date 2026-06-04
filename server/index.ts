@@ -1,32 +1,42 @@
 /**
- * Backend server: image → iNaturalist CV → Gemini enrichment → JSON.
+ * Backend server: image → iNaturalist CV → Wikipedia summary → JSON.
  *
- * Two external services compose the "database":
+ * Data sources:
  *   1. iNaturalist Computer Vision  (~85k taxa, species-level ID)
  *      POST https://api.inaturalist.org/v1/computervision/score_image
- *      Auth: 24h JWT bearer token from
- *        https://www.inaturalist.org/users/api_token
- *   2. Google Gemini  (description / habitat / fun-fact synthesis)
- *      Uses @google/genai already declared in package.json.
+ *      Auth: 24h JWT from https://www.inaturalist.org/users/api_token
+ *   2. Wikipedia REST API           (public, no auth)
+ *      GET https://{zh|en}.wikipedia.org/api/rest_v1/page/summary/{title}
+ *      Used to populate `description`. We try zh first, fall back to en.
  *
  * Endpoint:
  *   POST /api/identify   multipart/form-data  field=image
- *     → { id, name, scientificName, confidence,
- *         description, habitat, funFact,
+ *     → { id, name, scientificName, confidence, description,
  *         photoUrl, wikipediaUrl, inatUrl }
  */
 
 import express from 'express';
-import 'dotenv/config';
-import { GoogleGenAI, Type } from '@google/genai';
+import multer from 'multer';
+import dotenv from 'dotenv';
+import { ProxyAgent, setGlobalDispatcher } from 'undici';
+
+// Vite-style env precedence: .env.local overrides .env.
+dotenv.config({ path: '.env' });
+dotenv.config({ path: '.env.local', override: true });
+
+// Node's native fetch (undici) ignores HTTPS_PROXY by default. If the
+// host has an outbound proxy configured (common in restricted networks),
+// route fetch() through it so requests to Wikipedia / iNat succeed.
+const PROXY = process.env.HTTPS_PROXY || process.env.https_proxy;
+console.log(`[server] HTTPS_PROXY env: ${PROXY || '(none)'}`);
+if (PROXY && /^https?:\/\//i.test(PROXY)) {
+  setGlobalDispatcher(new ProxyAgent(PROXY));
+  console.log(`[server] routing fetch through HTTP proxy: ${PROXY}`);
+}
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 8787);
-
 const INAT_TOKEN = process.env.INAT_TOKEN;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-
-const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 
 interface InatTaxon {
   id: number;
@@ -41,8 +51,6 @@ interface InatTaxon {
 
 interface InatScoreItem {
   combined_score: number;
-  vision_score: number;
-  frequency_score: number;
   taxon: InatTaxon;
 }
 
@@ -52,8 +60,6 @@ interface InsectAnalysisResult {
   scientificName: string;
   confidence: number;
   description: string;
-  habitat: string;
-  funFact: string;
   photoUrl?: string;
   wikipediaUrl?: string;
   inatUrl?: string;
@@ -79,35 +85,51 @@ async function scoreImageWithInat(buf: Buffer, filename: string): Promise<InatSc
   return data.results ?? [];
 }
 
-const ENRICH_SCHEMA = {
-  type: Type.OBJECT,
-  properties: {
-    description: { type: Type.STRING, description: '一段中文生物特征描述，2-3 句' },
-    habitat: { type: Type.STRING, description: '中文的栖息环境描述，1-2 句' },
-    funFact: { type: Type.STRING, description: '中文的有趣事实，1 句' },
-  },
-  required: ['description', 'habitat', 'funFact'],
-};
-
-async function enrichWithGemini(commonName: string, scientificName: string) {
-  if (!ai) {
-    return {
-      description: `${commonName}（${scientificName}）。设置 GEMINI_API_KEY 后可自动生成详细描述。`,
-      habitat: '未知。',
-      funFact: '设置 GEMINI_API_KEY 以解锁有趣事实。',
-    };
+/**
+ * Pull a one-paragraph summary from Wikipedia.
+ *   1. Try zh.wikipedia with the Chinese common name (iNat returns one)
+ *   2. Try zh.wikipedia with the scientific name
+ *   3. Try en.wikipedia with the title from iNat's wikipedia_url
+ *   4. Try en.wikipedia with the scientific name
+ */
+async function fetchWikiSummary(
+  wikiUrl: string | undefined,
+  scientificName: string,
+  commonName: string | undefined,
+): Promise<string> {
+  let enTitle: string | undefined;
+  if (wikiUrl) {
+    const m = wikiUrl.match(/wikipedia\.org\/wiki\/(.+)$/);
+    if (m) enTitle = decodeURIComponent(m[1]);
   }
-  const prompt = `你是一位昆虫学家。请用中文为以下物种写百科介绍：\n` +
-    `中文名：${commonName}\n学名：${scientificName}\n\n` +
-    `要求：description 2-3 句描述形态特征；habitat 1-2 句描述栖息地与分布；funFact 1 句有趣事实。\n` +
-    `只输出 JSON，不要其他文字。`;
-  const resp = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: prompt,
-    config: { responseMimeType: 'application/json', responseSchema: ENRICH_SCHEMA },
-  });
-  const text = resp.text ?? '{}';
-  return JSON.parse(text) as { description: string; habitat: string; funFact: string };
+  const sciTitle = scientificName.replace(/\s+/g, '_');
+
+  const tryFetch = async (lang: string, title: string): Promise<string | null> => {
+    try {
+      const r = await fetch(
+        `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`,
+        { headers: { 'User-Agent': 'environment-detect/1.0' } },
+      );
+      if (!r.ok) return null;
+      const j = (await r.json()) as { extract?: string; type?: string };
+      if (j.type === 'disambiguation') return null;
+      return j.extract?.trim() || null;
+    } catch {
+      return null;
+    }
+  };
+
+  const attempts: Array<[string, string]> = [];
+  if (commonName && /[\u4e00-\u9fff]/.test(commonName)) attempts.push(['zh', commonName]);
+  attempts.push(['zh', sciTitle]);
+  if (enTitle) attempts.push(['en', enTitle]);
+  attempts.push(['en', sciTitle]);
+
+  for (const [lang, title] of attempts) {
+    const s = await tryFetch(lang, title);
+    if (s) return s;
+  }
+  return `${scientificName} — 暂无百科摘要。`;
 }
 
 function pickBestArthropod(items: InatScoreItem[]): InatScoreItem | undefined {
@@ -117,10 +139,10 @@ function pickBestArthropod(items: InatScoreItem[]): InatScoreItem | undefined {
   }) ?? items[0];
 }
 
-// Multer-less multipart parser using express's built-in raw + a tiny boundary
-// parser would be heavy; we use the standard `multer` lib instead.
-import multer from 'multer';
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+});
 
 app.post('/api/identify', upload.single('image'), async (req, res) => {
   try {
@@ -131,17 +153,19 @@ app.post('/api/identify', upload.single('image'), async (req, res) => {
 
     const total = items.reduce((s, i) => s + (i.combined_score ?? 0), 0) || 1;
     const confidence = (best.combined_score ?? 0) / total;
-    const commonName = best.taxon.preferred_common_name || best.taxon.english_common_name || best.taxon.name;
+    const commonName =
+      best.taxon.preferred_common_name ||
+      best.taxon.english_common_name ||
+      best.taxon.name;
     const scientificName = best.taxon.name;
-
-    const enriched = await enrichWithGemini(commonName, scientificName);
+    const description = await fetchWikiSummary(best.taxon.wikipedia_url, scientificName, commonName);
 
     const result: InsectAnalysisResult = {
       id: `inat-${best.taxon.id}`,
       name: commonName,
       scientificName,
       confidence,
-      ...enriched,
+      description,
       photoUrl: best.taxon.default_photo?.medium_url,
       wikipediaUrl: best.taxon.wikipedia_url,
       inatUrl: `https://www.inaturalist.org/taxa/${best.taxon.id}`,
@@ -154,15 +178,10 @@ app.post('/api/identify', upload.single('image'), async (req, res) => {
 });
 
 app.get('/api/health', (_req, res) => {
-  res.json({
-    ok: true,
-    inatToken: Boolean(INAT_TOKEN),
-    geminiKey: Boolean(GEMINI_API_KEY),
-  });
+  res.json({ ok: true, inatToken: Boolean(INAT_TOKEN) });
 });
 
 app.listen(PORT, () => {
   console.log(`[server] listening on :${PORT}`);
   console.log(`[server] iNat token: ${INAT_TOKEN ? 'set' : 'MISSING'}`);
-  console.log(`[server] Gemini key: ${GEMINI_API_KEY ? 'set' : 'MISSING (enrichment will be stubbed)'}`);
 });

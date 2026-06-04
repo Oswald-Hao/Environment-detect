@@ -2,7 +2,7 @@
 
 # 🐞 Environment Detect · 自然图鉴
 
-**上传一张昆虫照片，识别物种 + 自动生成中文百科**
+**上传一张昆虫照片，识别物种 + 自动拉百科摘要**
 
 </div>
 
@@ -13,16 +13,16 @@
 一个端到端的昆虫识别 Web App：
 
 - **前端**：React 19 + Vite + Tailwind v4，已有的扫描动效 + 结果卡片
-- **后端**：Express + TypeScript，接收图片 → 调 iNaturalist CV → 拿到候选物种 → 调 Gemini 生成中文描述
+- **后端**：Express + TypeScript，接收图片 → 调 iNaturalist CV → 拿到候选物种 → 调 Wikipedia REST API 取一段摘要
 - **离线备份**：`python/` 目录下有一份独立的 Python 实现，含本地 ViT 兜底，离线也能用
 
 ### 识别能力
 
-| 数据源 | 物种量级 | 备注 |
+| 数据源 | 用途 | 鉴权 |
 | --- | --- | --- |
-| [iNaturalist CV API](https://api.inaturalist.org/v1/docs/#!/Computer_Vision/post_computervision_score_image) | **~85,000 个物种** | 主要识别引擎，species 级输出，自动返回中文俗名 |
-| [Google Gemini 2.5 Flash](https://ai.google.dev/) | — | 根据物种名生成 description / habitat / funFact |
-| `google/vit-base-patch16-224`（Python 备份） | 32 个大类 | 离线兜底用，不依赖网络 |
+| [iNaturalist CV API](https://api.inaturalist.org/v1/docs/#!/Computer_Vision/post_computervision_score_image) | 物种识别（~85k 物种，species 级，中文俗名） | 24h JWT (`INAT_TOKEN`) |
+| [Wikipedia REST API](https://en.wikipedia.org/api/rest_v1/) | description 摘要（先 zh.wikipedia，回退 en.wikipedia） | 免鉴权 |
+| `google/vit-base-patch16-224`（Python 备份） | 离线兜底，32 个大类 | 免鉴权 |
 
 实测：帝王斑蝶照片 → `Danaus plexippus` species 级，置信度 **98.7%**。
 
@@ -36,18 +36,16 @@
 npm install
 ```
 
-### 2) 配置密钥
+### 2) 配置 token
 
-复制 `.env.example` 为 `.env.local`，填入：
+复制 `.env.example` 为 `.env.local`，填入 iNaturalist JWT：
 
 ```env
 INAT_TOKEN="eyJhbGciOiJIUzUxMiJ9...."   # 来自 https://www.inaturalist.org/users/api_token
-GEMINI_API_KEY="AIza...."               # 来自 https://aistudio.google.com/apikey
 PORT=8787
 ```
 
-- **iNat token 必填**。先到 https://www.inaturalist.org/signup 注册（免费），登录后访问 https://www.inaturalist.org/users/api_token 复制 JWT。**有效期 24 小时**，过期再访问同一 URL 即可刷新。
-- **Gemini key 选填**。不填时仍能识别物种，但 description / habitat / funFact 会是占位文字。
+- 先到 https://www.inaturalist.org/signup 注册（免费），登录后访问 https://www.inaturalist.org/users/api_token 复制 JWT。**有效期 24 小时**，过期再访问同一 URL 即可刷新。
 
 ### 3) 启动
 
@@ -59,7 +57,7 @@ npm run dev
 - 前端 dev server：http://localhost:3000
 - 后端 API：http://localhost:8787（`/api/identify`、`/api/health`）
 
-Vite 已配置把 `/api/*` 反向代理到后端，所以前端直接 `fetch('/api/identify')` 即可。
+Vite 已配置把 `/api/*` 反向代理到后端，前端直接 `fetch('/api/identify')` 即可。
 
 ---
 
@@ -78,15 +76,14 @@ Express ─→ iNat CV /v1/computervision/score_image
      ├─ 取置信度最高的节肢门候选
      │
      ▼
-Gemini 2.5 Flash
-     │  prompt: "用中文为 {name}({sciName}) 写描述/栖息地/趣闻"
-     │  responseSchema: { description, habitat, funFact }
+Wikipedia REST  /page/summary/{title}
+     │  先尝试 zh.wikipedia.org，404 则回退 en.wikipedia.org
      │
      ▼
 返回 InsectAnalysisResult JSON
      │
      ▼
-前端 ResultCard 渲染（图片 + 中英文名 + 置信度条 + 三段文案）
+前端 ResultCard 渲染（图片 + 中英文名 + 置信度条 + 百科摘要 + 外链）
 ```
 
 ---
@@ -100,7 +97,7 @@ Gemini 2.5 Flash
 │   ├── components/          # HeroSection / UploadSection / ScanningOverlay / ResultCard / FeaturesSection
 │   └── lib/api.ts           # identifyInsect() — 调 /api/identify
 ├── server/
-│   └── index.ts             # Express 后端：iNat CV + Gemini 编排
+│   └── index.ts             # Express 后端：iNat CV + Wikipedia
 ├── python/                  # 独立 Python 实现（可选）
 │   ├── identifier.py        # 本地 ViT 后端，32 类，无需网络/token
 │   ├── inat_cv.py           # iNat CV 后端，~85k 物种
@@ -127,18 +124,22 @@ Gemini 2.5 Flash
   "name": "君主斑蝶",
   "scientificName": "Danaus plexippus",
   "confidence": 0.987,
-  "description": "...",
-  "habitat": "...",
-  "funFact": "...",
+  "description": "君主斑蝶（学名：Danaus plexippus）... ",
   "photoUrl": "https://inaturalist-open-data.s3.amazonaws.com/...",
   "wikipediaUrl": "https://en.wikipedia.org/wiki/Monarch_butterfly",
   "inatUrl": "https://www.inaturalist.org/taxa/48662"
 }
 ```
 
+字段 `habitat`、`funFact` 已弃用；前端 ResultCard 在缺省时自动不渲染对应卡片。
+
 ### `GET /api/health`
 
-返回当前密钥配置状态，便于排查 401。
+```jsonc
+{ "ok": true, "inatToken": true }
+```
+
+便于排查 401。
 
 ---
 
@@ -171,5 +172,5 @@ python app.py
 - **识别结果总是某种鸟/植物**  
   后端会自动过滤到 `Insecta` / `Arachnida` 的候选；如果都不是节肢门，会返回置信度最高的那一个。
 
-- **没有 Gemini key 能用吗**  
-  能。物种名和置信度都来自 iNat，照样准确。只是 description / habitat / funFact 会是占位文字。
+- **`description` 显示英文摘要**  
+  说明这个物种的中文维基词条不存在（罕见物种常见情况）。回退是 en.wikipedia，仍然有内容。
