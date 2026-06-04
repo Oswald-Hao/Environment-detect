@@ -75,37 +75,73 @@ export function ResultCard({ result, imagePreview, onReset }: ResultCardProps) {
           </p>
         </motion.div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <motion.div 
-            initial={{ opacity: 0, x: -10 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ delay: 0.6 }}
-            className="bg-forest-50 rounded-2xl p-5 border border-forest-100"
-          >
-            <h4 className="flex items-center gap-2 font-medium text-forest-700 mb-2">
-              <Leaf className="w-4 h-4 text-forest-500" />
-              栖息环境
-            </h4>
-            <p className="text-sm text-forest-800/80 leading-relaxed">
-              {result.habitat}
-            </p>
-          </motion.div>
+        {(result.habitat || result.funFact) && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {result.habitat && (
+              <motion.div
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: 0.6 }}
+                className="bg-forest-50 rounded-2xl p-5 border border-forest-100"
+              >
+                <h4 className="flex items-center gap-2 font-medium text-forest-700 mb-2">
+                  <Leaf className="w-4 h-4 text-forest-500" />
+                  栖息环境
+                </h4>
+                <p className="text-sm text-forest-800/80 leading-relaxed">
+                  {result.habitat}
+                </p>
+              </motion.div>
+            )}
 
-          <motion.div 
-            initial={{ opacity: 0, x: 10 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ delay: 0.7 }}
-            className="bg-amber-50 rounded-2xl p-5 border border-amber-100"
+            {result.funFact && (
+              <motion.div
+                initial={{ opacity: 0, x: 10 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: 0.7 }}
+                className="bg-amber-50 rounded-2xl p-5 border border-amber-100"
+              >
+                <h4 className="flex items-center gap-2 font-medium text-amber-700 mb-2">
+                  <Sparkles className="w-4 h-4 text-amber-500" />
+                  有趣的事实
+                </h4>
+                <p className="text-sm text-amber-900/80 leading-relaxed">
+                  {result.funFact}
+                </p>
+              </motion.div>
+            )}
+          </div>
+        )}
+
+        {(result.wikipediaUrl || result.inatUrl) && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.8 }}
+            className="flex flex-wrap gap-4 text-sm pt-2"
           >
-            <h4 className="flex items-center gap-2 font-medium text-amber-700 mb-2">
-              <Sparkles className="w-4 h-4 text-amber-500" />
-              有趣的事实
-            </h4>
-            <p className="text-sm text-amber-900/80 leading-relaxed">
-              {result.funFact}
-            </p>
+            {result.wikipediaUrl && (
+              <a
+                href={result.wikipediaUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="text-forest-700 hover:text-forest-900 underline underline-offset-2"
+              >
+                Wikipedia →
+              </a>
+            )}
+            {result.inatUrl && (
+              <a
+                href={result.inatUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="text-forest-700 hover:text-forest-900 underline underline-offset-2"
+              >
+                iNaturalist →
+              </a>
+            )}
           </motion.div>
-        </div>
+        )}
 
         <motion.div 
           initial={{ opacity: 0 }}

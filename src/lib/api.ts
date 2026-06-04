@@ -4,8 +4,8 @@ export interface InsectAnalysisResult {
   scientificName: string;
   confidence: number;
   description: string;
-  habitat: string;
-  funFact: string;
+  habitat?: string;
+  funFact?: string;
   photoUrl?: string;
   wikipediaUrl?: string;
   inatUrl?: string;
@@ -13,7 +13,7 @@ export interface InsectAnalysisResult {
 
 /**
  * 调用后端 /api/identify。
- * 后端流程：iNaturalist CV 识别物种 → Gemini 生成中文百科 → 返回 JSON。
+ * 后端流程：iNaturalist CV 识别物种 → Wikipedia 拉中文/英文摘要 → 返回 JSON。
  *
  * 接受 File（来自上传）；如需传入 Base64 字符串，先转回 File/Blob 即可。
  */
